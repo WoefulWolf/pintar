@@ -1,0 +1,11 @@
+[package]
+name = "pintar"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+directx_math = "0.2.2"
+windows = { version = "0.51.1", features = ["Win32_Graphics_Dxgi", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_Foundation", "Win32_Graphics_Direct3D"] }
+tracing = "0.1.37"
