@@ -5,8 +5,8 @@ use std::mem::size_of;
 use mesh::{Mesh, LineMesh};
 use default_elements::DefaultVertex;
 use windows::Win32::Foundation::BOOL;
-// use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC};
-use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_D24_UNORM_S8_UINT, DXGI_FORMAT_D32_FLOAT_S8X24_UINT};
+use windows::Win32::Graphics::Dxgi::{IDXGISwapChain, DXGI_SWAP_CHAIN_DESC};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::core::ComInterface;
 use directx_math::*;
@@ -40,7 +40,7 @@ pub struct Pintar {
     cw_rasterizer_state: Option<ID3D11RasterizerState>,
     depth_stencil_state: Option<ID3D11DepthStencilState>,
 
-    render_target_resource: Option<ID3D11Resource>,
+    render_target_view: Option<ID3D11RenderTargetView>,
     depth_stencil_resource: Option<ID3D11Resource>,
 
     depth_pass_index: u32,
@@ -57,10 +57,13 @@ impl Pintar {
     pub fn new(swapchain: &IDXGISwapChain, depth_pass_target_index: u32) -> Pintar {
         let device = unsafe { swapchain.GetDevice::<ID3D11Device>().unwrap() };
 
+        let mut swap_chain_desc = DXGI_SWAP_CHAIN_DESC::default();
+        unsafe { swapchain.GetDesc(&mut swap_chain_desc).unwrap() };
+
         let mut feature_data: D3D11_FEATURE_DATA_D3D11_OPTIONS2 = unsafe { std::mem::zeroed() };
         let res = unsafe { device.CheckFeatureSupport(D3D11_FEATURE_D3D11_OPTIONS2, &mut feature_data as *mut D3D11_FEATURE_DATA_D3D11_OPTIONS2 as *mut c_void, size_of::<D3D11_FEATURE_DATA_D3D11_OPTIONS2>() as u32) };
         res.expect("Failed to get device features.");
-        println!("{:?}", feature_data);
+        // info!("{:?}", feature_data);
 
         // Blending
         let rt_blend_desc = D3D11_RENDER_TARGET_BLEND_DESC {
@@ -186,12 +189,13 @@ impl Pintar {
         
         let mut pintar = Pintar {
             device: device.clone(),
+
             blend_state,
             ccw_rasterizer_state,
             cw_rasterizer_state,
             depth_stencil_state,
 
-            render_target_resource: None,
+            render_target_view: None,
             depth_stencil_resource: None,
 
             depth_pass_index: 0,
@@ -239,10 +243,19 @@ impl Pintar {
         }
     }
 
+    pub fn drop_back_buffer_data(&mut self) {
+        drop(self.render_target_view.take());
+    }
+
     pub fn update_back_buffer_data(&mut self, swapchain: &IDXGISwapChain) {
         let back_buffer: ID3D11Texture2D = unsafe { swapchain.GetBuffer::<ID3D11Texture2D>(0).unwrap() };
         let mut back_buffer_desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { back_buffer.GetDesc(&mut back_buffer_desc) };
+
+        let res = unsafe { self.device.CreateRenderTargetView(&back_buffer, None, Some(&mut self.render_target_view)) };
+        if res.is_err() {
+            error!("Failed to create RenderTargetView!");
+        }
 
         self.back_buffer_data.width = back_buffer_desc.Width;
         self.back_buffer_data.height = back_buffer_desc.Height;
@@ -263,10 +276,10 @@ impl Pintar {
 
         if (self.back_buffer_data.width == depth_stencil_desc.Width)
         && (self.back_buffer_data.height == depth_stencil_desc.Height)
-        && (depth_stencil_desc.BindFlags & 0x40 != 0x0) {
+        && (depth_stencil_desc.BindFlags & 0x40 != 0) {
             if self.depth_pass_index == self.depth_pass_target_index {
-                self.render_target_resource = unsafe { render_target_views.unwrap().GetResource().ok() };
                 self.depth_stencil_resource = Some(depth_stencil_res);
+                // info!("DSD: {:?}", depth_stencil_desc);
             }
 
             self.depth_pass_index += 1;
@@ -285,16 +298,32 @@ impl Pintar {
             context.OMSetDepthStencilState(self.depth_stencil_state.as_ref().unwrap(), 1);
         }
 
-        let mut render_target_view: Option<ID3D11RenderTargetView> = None;
+
+        let depth_stencil_tex = self.depth_stencil_resource.as_ref().unwrap().cast::<ID3D11Texture2D>().unwrap();
+        let mut depth_stencil_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { depth_stencil_tex.GetDesc(&mut depth_stencil_desc) };
+
+        let dsv_format = match depth_stencil_desc.Format.0 {
+            19 => DXGI_FORMAT_D32_FLOAT_S8X24_UINT,
+            44 => DXGI_FORMAT_D24_UNORM_S8_UINT,
+            _ => DXGI_FORMAT_D24_UNORM_S8_UINT,
+        };
+
+        let depth_stencil_view_desc = D3D11_DEPTH_STENCIL_VIEW_DESC {
+            Format: dsv_format,
+            ViewDimension: D3D11_DSV_DIMENSION_TEXTURE2D,
+            Flags: 0,
+            Anonymous: D3D11_DEPTH_STENCIL_VIEW_DESC_0 {
+                Texture2D: D3D11_TEX2D_DSV { MipSlice: 0 }
+            }
+        };
+
         let mut depth_stencil_view: Option<ID3D11DepthStencilView> = None;
         unsafe {
-            self.device.CreateRenderTargetView(self.render_target_resource.as_ref().unwrap(), None, Some(&mut render_target_view))
-                .expect("Failed to create render target view!");
-
-            self.device.CreateDepthStencilView(self.depth_stencil_resource.as_ref().unwrap(), None, Some(&mut depth_stencil_view))
+            self.device.CreateDepthStencilView(self.depth_stencil_resource.as_ref(), Some(&depth_stencil_view_desc), Some(&mut depth_stencil_view))
                 .expect("Failed to create depth stencil view!");
 
-            context.OMSetRenderTargets(Some(&[render_target_view]), depth_stencil_view.as_ref().unwrap());
+            context.OMSetRenderTargets(Some(&[self.render_target_view.clone()]), depth_stencil_view.as_ref().unwrap());
         }
 
         // Map vertex groups' buffers
@@ -329,9 +358,8 @@ impl Pintar {
             context.RSSetState(self.cw_rasterizer_state.as_ref().unwrap());
         }
 
-        // Reset depth and render target resources
+        // Reset depth resource
         self.depth_stencil_resource = None;
-        self.render_target_resource = None;
 
         // Reset depth pass index
         self.depth_pass_index = 0;
